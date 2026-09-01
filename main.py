@@ -14,9 +14,9 @@ async def receive_webhook(request: Request):
     body = await request.body()
     message = body.decode("utf-8").strip()
 
-    if message.startswith("NAS_"):
+    if message.startswith("NAS"):
         symbol = "NAS"
-    elif message.startswith("BTC_"):
+    elif message.startswith("BTC"):
         symbol = "BTC"
     else:
         return {"status": "ignored", "reason": "no symbol tag"}
