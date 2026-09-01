@@ -1,4 +1,3 @@
-```python
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
@@ -47,4 +46,3 @@ async def get_signal(symbol: str):
 
 
 app.mount("/", StaticFiles(directory="public", html=True), name="static")
-```
