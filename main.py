@@ -1,10 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
-# 단일 값이 아닌 리스트(list) 형태로 변경
+# 한국 표준시(KST: UTC+9) 정의
+KST = timezone(timedelta(hours=9))
+
+# 단일 값이 아닌 리스트(list) 형태로 저장
 signals_history = {
     "NAS": [],
     "BTC": [],
@@ -32,16 +35,16 @@ async def receive_webhook(request: Request):
         print("[WEBHOOK IGNORED] No matching symbol (NAS/BTC)")
         return {"status": "ignored", "reason": "no matching symbol (NAS/BTC)"}
 
-    # 수신 데이터 개별 객체 생성
+    # 수신 데이터 개별 객체 생성 (한국 시간 KST 적용)
     new_signal = {
         "message": message,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"),
     }
 
     # 리스트 맨 위에 최신 신호 추가 (최신순 정렬)
     signals_history[symbol].insert(0, new_signal)
 
-    # 개수가 너무 많아져 메모리가 낭비되지 않도록 최대 50개까지만 유지
+    # 메모리 관리를 위해 최근 50개까지만 유지
     signals_history[symbol] = signals_history[symbol][:50]
 
     print(f"[SIGNAL ADDED] {symbol} (Total: {len(signals_history[symbol])})")
