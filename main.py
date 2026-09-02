@@ -18,7 +18,7 @@ CHAT_ID = "2106941258"
 
 # SMR 신호가 계속 들어올 때
 # 마지막 신호를 기준으로 10분 동안 0선 돌파 대기
-WAIT_SECONDS = 10 * 60
+WAIT_SECONDS = 20 * 60
 
 
 # =========================================================
@@ -119,7 +119,7 @@ def create_final_signal(symbol, direction):
 
 def start_waiting(symbol, direction):
 
-    # 기존 대기 상태가 10분을 넘었으면 먼저 만료 처리
+    # 기존 대기 상태가 20분을 넘었으면 먼저 만료 처리
     check_timeout(symbol)
 
     now = datetime.now(KST)
@@ -131,7 +131,7 @@ def start_waiting(symbol, direction):
 
     # -----------------------------------------------------
     # 같은 종목 + 같은 방향의 SMR
-    # → 마지막 신호 시간으로 10분을 다시 시작
+    # → 마지막 신호 시간으로 20분을 다시 시작
     # -----------------------------------------------------
 
     if waiting["active"] and waiting["direction"] == direction:
@@ -143,7 +143,7 @@ def start_waiting(symbol, direction):
         )
 
         print(
-            f"⏱ 마지막 신호 기준 10분 대기 갱신"
+            f"⏱ 마지막 신호 기준 20분 대기 갱신"
         )
 
         return
@@ -167,7 +167,7 @@ def start_waiting(symbol, direction):
 
 
 # =========================================================
-# [7] 10분 시간 초과 확인
+# [7] 20분 시간 초과 확인
 # =========================================================
 
 def check_timeout(symbol):
