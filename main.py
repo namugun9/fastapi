@@ -449,23 +449,3 @@ def get_signal(symbol: str):
         "symbol": symbol,
         "signals": signals_history[symbol]
     }
-
-
-# =========================================================
-# [12] 정적 파일
-# =========================================================
-
-try:
-
-    app.mount(
-        "/",
-        StaticFiles(
-            directory="static",
-            html=True
-        ),
-        name="static"
-    )
-
-except Exception:
-
-    pass
