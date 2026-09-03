@@ -13,7 +13,7 @@ KST = timezone(timedelta(hours=9))
 
 # 텔레그램
 # 반드시 새로 발급받은 BOT_TOKEN 입력
-BOT_TOKEN = "여기에_새로운_봇_토큰"
+BOT_TOKEN = "8899307951:AAHtgu2aW3ROCI-G7gwrp4glfaiD1vAycbY"
 CHAT_ID = "2106941258"
 
 # 마지막 SMR 신호를 기준으로 20분 동안 0선 돌파 대기
