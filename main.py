@@ -12,8 +12,7 @@ app = FastAPI()
 KST = timezone(timedelta(hours=9))
 
 # 텔레그램
-# 반드시 본인의 새 BOT_TOKEN으로 입력
-BOT_TOKEN = "8899307951:AAGJf1T-NuugSO6xCDmsqrz9eeGNGbHcfME"
+BOT_TOKEN = "8899307951:AAHtgu2aW3ROCI-G7gwrp4glfaiD1vAycbY"
 CHAT_ID = "2106941258"
 
 # SMR 마지막 신호를 기준으로 20분 동안 0선 돌파 대기
@@ -160,7 +159,6 @@ def create_final_signal(symbol, direction):
 
     if symbol == "NAS":
         nas_position = direction
-
     else:
         btc_position = direction
 
@@ -186,7 +184,7 @@ def create_final_signal(symbol, direction):
 
 
 # =========================================================
-# [7] 청산 처리
+# [7] 청산 처리 (개선됨: 이전 포지션 유무 상관없이 청산 알림 전송)
 # =========================================================
 
 def process_close(symbol):
@@ -194,40 +192,14 @@ def process_close(symbol):
     global nas_position
     global btc_position
 
-    # -----------------------------------------------------
     # 현재 포지션 확인
-    # -----------------------------------------------------
-
-    if symbol == "NAS":
-        position = nas_position
-    else:
-        position = btc_position
-
-    # -----------------------------------------------------
-    # 포지션이 없으면 청산 무시
-    # -----------------------------------------------------
-
-    if position is None:
-
-        print(
-            f"⚪ {symbol} 청산 신호 → "
-            f"현재 포지션 없음. 무시"
-        )
-
-        return {
-            "status": "ignored",
-            "reason": "no_position"
-        }
-
-    # -----------------------------------------------------
-    # 포지션이 있으면 청산
-    # -----------------------------------------------------
+    position = nas_position if symbol == "NAS" else btc_position
 
     print(
-        f"⚪ {symbol} {position} 포지션 청산"
+        f"⚪ {symbol} 청산 신호 수신 (기존 포지션: {position})"
     )
 
-    # 텔레그램 청산 알림
+    # 텔레그램 청산 알림 무조건 발송
     send_telegram_signal(
         "CLOSE",
         "NAS100" if symbol == "NAS" else "BTC"
@@ -422,7 +394,7 @@ def process_zero_cross(symbol):
 
 
 # =========================================================
-# [11] TradingView 웹훅
+# [11] TradingView 웹훅 (문자열 매칭 강화)
 # =========================================================
 
 @app.post("/webhook")
@@ -440,20 +412,21 @@ async def webhook(request: Request):
     print(message)
     print("==============================")
 
-    upper_message = message.upper()
+    # 공백 제거 및 대문자 변환으로 조건 완화
+    clean_message = message.replace(" ", "").upper()
 
 
     # =====================================================
     # NAS
     # =====================================================
 
-    if "NAS" in upper_message:
+    if "NAS" in clean_message:
 
         # -------------------------------------------------
         # NAS 청산
         # -------------------------------------------------
 
-        if "NAS100 청산" in message:
+        if "청산" in clean_message:
 
             return process_close("NAS")
 
@@ -462,7 +435,7 @@ async def webhook(request: Request):
         # NAS 0선 돌파
         # -------------------------------------------------
 
-        if "NAS100 0선 돌파" in message:
+        if "0선돌파" in clean_message or "0선" in clean_message:
 
             return process_zero_cross("NAS")
 
@@ -471,11 +444,7 @@ async def webhook(request: Request):
         # NAS 지지 → BUY 대기
         # -------------------------------------------------
 
-        if (
-            "지지구간 생성" in message
-            or
-            "지지구간 진입" in message
-        ):
+        if "지지구간" in clean_message:
 
             start_waiting(
                 "NAS",
@@ -493,11 +462,7 @@ async def webhook(request: Request):
         # NAS 저항 → SELL 대기
         # -------------------------------------------------
 
-        if (
-            "저항구간 생성" in message
-            or
-            "저항구간 진입" in message
-        ):
+        if "저항구간" in clean_message:
 
             start_waiting(
                 "NAS",
@@ -521,13 +486,13 @@ async def webhook(request: Request):
     # BTC
     # =====================================================
 
-    if "BTC" in upper_message:
+    if "BTC" in clean_message:
 
         # -------------------------------------------------
         # BTC 청산
         # -------------------------------------------------
 
-        if "BTC 청산" in message:
+        if "청산" in clean_message:
 
             return process_close("BTC")
 
@@ -536,7 +501,7 @@ async def webhook(request: Request):
         # BTC 0선 돌파
         # -------------------------------------------------
 
-        if "BTC 0선 돌파" in message:
+        if "0선돌파" in clean_message or "0선" in clean_message:
 
             return process_zero_cross("BTC")
 
@@ -545,11 +510,7 @@ async def webhook(request: Request):
         # BTC 지지 → BUY 대기
         # -------------------------------------------------
 
-        if (
-            "지지구간 생성" in message
-            or
-            "지지구간 진입" in message
-        ):
+        if "지지구간" in clean_message:
 
             start_waiting(
                 "BTC",
@@ -567,11 +528,7 @@ async def webhook(request: Request):
         # BTC 저항 → SELL 대기
         # -------------------------------------------------
 
-        if (
-            "저항구간 생성" in message
-            or
-            "저항구간 진입" in message
-        ):
+        if "저항구간" in clean_message:
 
             start_waiting(
                 "BTC",
