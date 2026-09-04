@@ -467,10 +467,10 @@ async def webhook(request: Request):
     if "NAS" in clean_message:
 
         # -------------------------------------------------
-        # NAS 청산
+        # NAS100 청산
         # -------------------------------------------------
 
-        if "NAS청산" in clean_message:
+        if "NAS100청산" in clean_message:
 
             return process_close("NAS")
 
