@@ -16,7 +16,8 @@ KST = timezone(timedelta(hours=9))
 BOT_TOKEN = "8899307951:AAHtgu2aW3ROCI-G7gwrp4glfaiD1vAycbY"
 CHAT_ID = "2106941258"
 
-# 마지막 SMR 신호를 기준으로 20분 동안 0선 돌파 대기
+# NAS100: 지지+상승 또는 저항+하락을 20분 이내 조합
+# BTC: 마지막 SMR 신호를 기준으로 20분 동안 0선 돌파 대기
 WAIT_SECONDS = 20 * 60
 
 
@@ -24,12 +25,19 @@ WAIT_SECONDS = 20 * 60
 # [2] NAS / BTC 대기 상태
 # =========================================================
 
-nas_waiting = {
-    "active": False,
-    "direction": None,
-    "timestamp": None
+# NAS100 매수 조건: 지지구간 + 상승
+nas_buy_waiting = {
+    "support": None,
+    "up": None
 }
 
+# NAS100 매도 조건: 저항구간 + 하락
+nas_sell_waiting = {
+    "resistance": None,
+    "down": None
+}
+
+# BTC는 기존 방식 유지: SMR + 0선돌파
 btc_waiting = {
     "active": False,
     "direction": None,
@@ -249,7 +257,121 @@ def process_close(symbol):
 
 
 # =========================================================
-# [8] SMR 대기 시작 / 갱신
+# [8] NAS100 지지/상승 또는 저항/하락 조합 처리
+# =========================================================
+
+def process_nas_pair(signal_type):
+    """
+    NAS100은 순서와 관계없이 두 신호가 20분 안에 모두 발생하면
+    최종 매수/매도 신호를 만든다.
+
+    BUY  = 지지구간 + 상승
+    SELL = 저항구간 + 하락
+    """
+
+    now = datetime.now(KST)
+
+    if signal_type in ("support", "up"):
+        waiting = nas_buy_waiting
+        pair_keys = ("support", "up")
+        direction = "BUY"
+        pair_name = "지지구간 + 상승"
+    else:
+        waiting = nas_sell_waiting
+        pair_keys = ("resistance", "down")
+        direction = "SELL"
+        pair_name = "저항구간 + 하락"
+
+    # -----------------------------------------------------
+    # 20분이 지난 신호는 만료
+    # -----------------------------------------------------
+
+    for key in pair_keys:
+        timestamp = waiting[key]
+
+        if timestamp is not None:
+            elapsed = (now - timestamp).total_seconds()
+
+            if elapsed >= WAIT_SECONDS:
+                print(
+                    f"⌛ NAS100 {key} 신호 → "
+                    f"20분 초과. 만료 처리"
+                )
+                waiting[key] = None
+
+    # -----------------------------------------------------
+    # 현재 신호 기록
+    # 같은 신호가 반복되어도 최초 신호 시간을 유지
+    # -----------------------------------------------------
+
+    if waiting[signal_type] is None:
+        waiting[signal_type] = now
+
+        print(
+            f"⏳ NAS100 {signal_type} 신호 기록"
+        )
+        print(
+            f"⏰ 기준 시간: "
+            f"{now.strftime('%H:%M:%S')} KST"
+        )
+    else:
+        print(
+            f"🔄 NAS100 {signal_type} 신호 반복 → "
+            f"기존 기준 시간 유지"
+        )
+
+    # -----------------------------------------------------
+    # 두 신호가 모두 있고 20분 이내인지 확인
+    # -----------------------------------------------------
+
+    first_time = waiting[pair_keys[0]]
+    second_time = waiting[pair_keys[1]]
+
+    if first_time is not None and second_time is not None:
+
+        gap = abs(
+            (first_time - second_time).total_seconds()
+        )
+
+        if gap <= WAIT_SECONDS:
+
+            print(
+                f"🔥 NAS100 {pair_name} 조건 완성 "
+                f"→ {direction}"
+            )
+
+            create_final_signal(
+                "NAS",
+                direction
+            )
+
+            # 최종 신호 후 두 조건 초기화
+            waiting[pair_keys[0]] = None
+            waiting[pair_keys[1]] = None
+
+            print(
+                f"✅ NAS100 최종 {direction} 신호 완료"
+            )
+
+            return {
+                "status": "final_signal",
+                "symbol": "NAS",
+                "direction": direction
+            }
+
+        # 안전 처리
+        waiting[pair_keys[0]] = None
+        waiting[pair_keys[1]] = None
+
+    return {
+        "status": "waiting",
+        "symbol": "NAS",
+        "condition": pair_name
+    }
+
+
+# =========================================================
+# [9] BTC 기존 SMR 대기 / 갱신
 # =========================================================
 
 def start_waiting(symbol, direction):
@@ -258,14 +380,7 @@ def start_waiting(symbol, direction):
     check_timeout(symbol)
 
     now = datetime.now(KST)
-
-    if symbol == "NAS":
-
-        waiting = nas_waiting
-
-    else:
-
-        waiting = btc_waiting
+    waiting = btc_waiting
 
     # -----------------------------------------------------
     # 같은 종목 + 같은 방향
@@ -312,21 +427,14 @@ def start_waiting(symbol, direction):
 
 
 # =========================================================
-# [9] 20분 시간 초과 확인
+# [10] BTC 20분 시간 초과 + 0선 돌파 처리
 # =========================================================
 
 def check_timeout(symbol):
 
-    if symbol == "NAS":
-
-        waiting = nas_waiting
-
-    else:
-
-        waiting = btc_waiting
+    waiting = btc_waiting
 
     if not waiting["active"]:
-
         return False
 
     now = datetime.now(KST)
@@ -352,19 +460,9 @@ def check_timeout(symbol):
     return False
 
 
-# =========================================================
-# [10] 0선 돌파 처리
-# =========================================================
-
 def process_zero_cross(symbol):
 
-    if symbol == "NAS":
-
-        waiting = nas_waiting
-
-    else:
-
-        waiting = btc_waiting
+    waiting = btc_waiting
 
     # -----------------------------------------------------
     # SMR이 먼저 발생하지 않았다면 무시
@@ -398,24 +496,12 @@ def process_zero_cross(symbol):
             "reason": "waiting_expired"
         }
 
-    # -----------------------------------------------------
-    # 현재 방향
-    # -----------------------------------------------------
-
     direction = waiting["direction"]
-
-    # -----------------------------------------------------
-    # 최종 신호
-    # -----------------------------------------------------
 
     create_final_signal(
         symbol,
         direction
     )
-
-    # -----------------------------------------------------
-    # 대기 상태 초기화
-    # -----------------------------------------------------
 
     waiting["active"] = False
     waiting["direction"] = None
@@ -476,12 +562,21 @@ async def webhook(request: Request):
 
 
         # -------------------------------------------------
-        # NAS 0선 돌파
+        # NAS100 상승
         # -------------------------------------------------
 
-        if "NAS1000선돌파" in clean_message:
+        if "NAS100상승" in clean_message:
 
-            return process_zero_cross("NAS")
+            return process_nas_pair("up")
+
+
+        # -------------------------------------------------
+        # NAS100 하락
+        # -------------------------------------------------
+
+        if "NAS100하락" in clean_message:
+
+            return process_nas_pair("down")
 
 
         # -------------------------------------------------
@@ -490,16 +585,7 @@ async def webhook(request: Request):
 
         if "지지구간" in clean_message:
 
-            start_waiting(
-                "NAS",
-                "BUY"
-            )
-
-            return {
-                "status": "waiting",
-                "symbol": "NAS",
-                "direction": "BUY"
-            }
+            return process_nas_pair("support")
 
 
         # -------------------------------------------------
@@ -508,16 +594,7 @@ async def webhook(request: Request):
 
         if "저항구간" in clean_message:
 
-            start_waiting(
-                "NAS",
-                "SELL"
-            )
-
-            return {
-                "status": "waiting",
-                "symbol": "NAS",
-                "direction": "SELL"
-            }
+            return process_nas_pair("resistance")
 
 
         return {
@@ -613,7 +690,37 @@ def get_waiting(symbol: str):
 
     if symbol == "NAS":
 
-        waiting = nas_waiting
+        return {
+            "symbol": symbol,
+            "buy_support": (
+                nas_buy_waiting["support"].strftime(
+                    "%Y-%m-%d %H:%M:%S KST"
+                )
+                if nas_buy_waiting["support"]
+                else None
+            ),
+            "buy_up": (
+                nas_buy_waiting["up"].strftime(
+                    "%Y-%m-%d %H:%M:%S KST"
+                )
+                if nas_buy_waiting["up"]
+                else None
+            ),
+            "sell_resistance": (
+                nas_sell_waiting["resistance"].strftime(
+                    "%Y-%m-%d %H:%M:%S KST"
+                )
+                if nas_sell_waiting["resistance"]
+                else None
+            ),
+            "sell_down": (
+                nas_sell_waiting["down"].strftime(
+                    "%Y-%m-%d %H:%M:%S KST"
+                )
+                if nas_sell_waiting["down"]
+                else None
+            )
+        }
 
     elif symbol == "BTC":
 
