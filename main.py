@@ -1,1225 +1,297 @@
-from fastapi import FastAPI, Request
-from datetime import datetime, timezone, timedelta
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
+
 import requests
+from fastapi import FastAPI, Request
 
+app = FastAPI(title="NAS100 Telegram Signal Server")
 
-# =========================================================
-# [1] 기본 설정
-# =========================================================
+WAIT_SECONDS = 120 * 60
 
-app = FastAPI()
-
+UTC = timezone.utc
 KST = timezone(timedelta(hours=9))
 
-# =========================================================
-# 텔레그램
-# =========================================================
-BOT_TOKEN = "8899307951:AAHtgu2aW3ROCI-G7gwrp4glfaiD1vAycbY"
-CHAT_ID = "2106941258"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8899307951:AAHtgu2aW3ROCI-G7gwrp4glfaiD1vAycbY")
+CHAT_ID = os.getenv("CHAT_ID", "2106941258,-1004483774716")
 
-# =========================================================
-# 매매 대기시간
-# =========================================================
-WAIT_SECONDS = 20 * 60
+waiting = {
+    "support": None,
+    "resistance": None,
+}
 
 
-# =========================================================
-# [2] 매매시간
-# =========================================================
-# 신규 BUY / SELL
-#   08:00 ~ 21:00
-#   22:35 ~ 05:00
-#
-# 청산은 24시간 허용
-# =========================================================
-
-def is_trade_time_kst():
-    now = datetime.now(KST)
-
-    current_minutes = now.hour * 60 + now.minute
-
-    # 08:00 ~ 21:00
-    if 8 * 60 <= current_minutes < 21 * 60:
-        return True
-
-    # 22:35 ~ 05:00
-    if current_minutes >= 22 * 60 + 35 or current_minutes < 5 * 60:
-        return True
-
-    return False
+def now_utc():
+    return datetime.now(UTC)
 
 
 def kst_now_text():
-    return datetime.now(KST).strftime(
-        "%Y-%m-%d %H:%M:%S KST"
-    )
+    return now_utc().astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
-# =========================================================
-# [3] NAS / BTC 대기 상태
-# =========================================================
-
-# ---------------------------------------------------------
-# NAS BUY 조건
-#
-# support = 지지구간 생성 OR 지지구간 진입
-# up      = NAS100 상승
-# ---------------------------------------------------------
-
-nas_buy_waiting = {
-    "support": None,
-    "up": None
-}
-
-
-# ---------------------------------------------------------
-# NAS SELL 조건
-#
-# resistance = 저항구간 생성 OR 저항구간 진입
-# down       = NAS100 하락
-# ---------------------------------------------------------
-
-nas_sell_waiting = {
-    "resistance": None,
-    "down": None
-}
-
-
-# ---------------------------------------------------------
-# BTC
-# 기존 로직 그대로 유지
-# ---------------------------------------------------------
-
-btc_waiting = {
-    "active": False,
-    "direction": None,
-    "timestamp": None
-}
-
-
-# =========================================================
-# [4] NAS / BTC 현재 포지션 상태
-# =========================================================
-
-nas_position = None
-btc_position = None
-
-
-# =========================================================
-# [5] 최종 신호 기록
-# =========================================================
-
-signals_history = {
-    "NAS": [],
-    "BTC": []
-}
-
-
-# =========================================================
-# [6] 텔레그램 전송
-# =========================================================
-
-def send_telegram_signal(action, symbol):
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
-    )
-
-    now = datetime.now(KST).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    # =====================================================
-    # BUY
-    # =====================================================
-
-    if action == "BUY":
-
-        text = (
-            f"🟢 **{symbol} 매수 신호**\n\n"
-            f"{symbol} 지지구간 확인\n"
-            f"매수세 유입 발생\n\n"
-            f"⏰ 시간: {now} KST"
-        )
-
-    # =====================================================
-    # SELL
-    # =====================================================
-
-    elif action == "SELL":
-
-        text = (
-            f"🔴 **{symbol} 매도 신호**\n\n"
-            f"{symbol} 저항구간 확인\n"
-            f"매도세 유입 발생\n\n"
-            f"⏰ 시간: {now} KST"
-        )
-
-    # =====================================================
-    # BUY 청산
-    # =====================================================
-
-    elif action == "CLOSE_BUY":
-
-        text = (
-            f"⚪ **{symbol} 매수 포지션 청산**\n\n"
-            f"{symbol} BUY 포지션 청산\n\n"
-            f"⏰ 시간: {now} KST"
-        )
-
-    # =====================================================
-    # SELL 청산
-    # =====================================================
-
-    elif action == "CLOSE_SELL":
-
-        text = (
-            f"⚪ **{symbol} 매도 포지션 청산**\n\n"
-            f"{symbol} SELL 포지션 청산\n\n"
-            f"⏰ 시간: {now} KST"
-        )
-
-    # 기존 전체 청산도 안전하게 유지
-    elif action == "CLOSE":
-
-        text = (
-            f"⚪ **{symbol} 청산**\n\n"
-            f"{symbol} 포지션 청산\n\n"
-            f"⏰ 시간: {now} KST"
-        )
-
-    else:
+def send_telegram(direction: str):
+    if direction not in ("BUY", "SELL"):
         return
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
+    if not BOT_TOKEN or not CHAT_ID:
+        print("[TELEGRAM] BOT_TOKEN 또는 CHAT_ID가 설정되지 않았습니다.")
+        return
+
+    if direction == "BUY":
+        text = (
+            "🟢 *NAS100 매수 진입 신호*\n\n"
+            "NAS 지지구간 확인\n"
+            "매수세력감지 확인\n\n"
+            f"⏰ 시간: {kst_now_text()}"
+        )
+    else:
+        text = (
+            "🔴 *NAS100 매도 진입 신호*\n\n"
+            "NAS 저항구간 확인\n"
+            "매도세력감지 확인\n\n"
+            f"⏰ 시간: {kst_now_text()}"
+        )
 
     try:
-
         response = requests.post(
-            url,
-            json=payload,
-            timeout=10
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "Markdown",
+            },
+            timeout=10,
         )
-
-        print(
-            f"Telegram: "
-            f"{response.status_code}"
-        )
-
+        print(f"[TELEGRAM] {response.status_code}")
     except Exception as e:
-
-        print(
-            f"Telegram Error: {e}"
-        )
+        print(f"[TELEGRAM ERROR] {e}")
 
 
-# =========================================================
-# [7] 최종 매매 신호
-# =========================================================
-
-def create_final_signal(symbol, direction):
-
-    global nas_position
-    global btc_position
-
-    # =====================================================
-    # BUY / SELL은 매매시간 외 차단
-    # =====================================================
-
-    if direction in ("BUY", "SELL"):
-
-        if not is_trade_time_kst():
-
-            print(
-                f"🚫 매매시간 외 최종 {direction} 차단 "
-                f"→ {symbol}"
-            )
-
-            return {
-                "status": "ignored",
-                "reason": "outside_trading_hours",
-                "symbol": symbol,
-                "direction": direction
-            }
-
-    # =====================================================
-    # 최종 신호 출력
-    # =====================================================
-
-    print(
-        f"🔥 최종 신호 발생 → "
-        f"{symbol} / {direction}"
+def parse_message(message: str) -> Optional[Tuple[str, str]]:
+    normalized = re.sub(
+        r"[^A-Z0-9가-힣_]",
+        "",
+        message.upper(),
     )
 
-    # =====================================================
-    # 포지션 상태
-    # =====================================================
+    if normalized.startswith("BTC"):
+        return None
 
-    if symbol == "NAS":
+    if "매수세력빠짐" in normalized:
+        return None
 
-        if direction == "BUY":
-            nas_position = "BUY"
+    if "매도세력빠짐" in normalized:
+        return None
 
-        elif direction == "SELL":
-            nas_position = "SELL"
+    if "매수세력감지" in normalized:
+        return "NAS", "buy_force"
 
-    else:
+    if "매도세력감지" in normalized:
+        return "NAS", "sell_force"
 
-        if direction == "BUY":
-            btc_position = "BUY"
+    if normalized.startswith("NAS지지구간생성"):
+        return "NAS", "support"
 
-        elif direction == "SELL":
-            btc_position = "SELL"
+    if normalized.startswith("NAS지지구간진입"):
+        return "NAS", "support"
 
-    # =====================================================
-    # 신호 기록
-    # =====================================================
+    if normalized.startswith("NAS저항구간생성"):
+        return "NAS", "resistance"
 
-    signals_history[symbol].append({
-        "time": datetime.now(KST).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        "direction": direction
-    })
+    if normalized.startswith("NAS저항구간진입"):
+        return "NAS", "resistance"
 
-    # =====================================================
-    # 텔레그램
-    # =====================================================
+    if normalized.startswith("NAS_지지구간"):
+        return "NAS", "support"
 
-    send_telegram_signal(
-        direction,
-        "NAS100" if symbol == "NAS" else "BTC"
-    )
+    if normalized.startswith("NAS_저항구간"):
+        return "NAS", "resistance"
 
-    return {
-        "status": "final_signal",
-        "symbol": symbol,
-        "direction": direction
-    }
+    return None
 
 
-# =========================================================
-# [8] NAS 대기 상태 전체 초기화
-# =========================================================
+def waiting_valid(timestamp):
+    if timestamp is None:
+        return False
 
-def clear_nas_waiting():
-
-    nas_buy_waiting["support"] = None
-    nas_buy_waiting["up"] = None
-
-    nas_sell_waiting["resistance"] = None
-    nas_sell_waiting["down"] = None
+    return now_utc() - timestamp <= timedelta(seconds=WAIT_SECONDS)
 
 
-# =========================================================
-# [9] NAS BUY 조건 처리
-# =========================================================
-#
-# BUY 조건:
-#
-#   (지지구간 생성 OR 지지구간 진입)
-#                    +
-#              NAS100 상승
-#
-# 두 신호의 순서는 관계없음.
-#
-# 어느 쪽이 먼저 와도 됨.
-#
-# 먼저 발생한 신호부터 20분.
-# 두 번째 신호가 20분 안에 오면 BUY.
-# =========================================================
+def cleanup_waiting():
+    if waiting["support"] is not None:
+        if not waiting_valid(waiting["support"]):
+            waiting["support"] = None
+            print("[WAIT EXPIRED] NAS BUY")
 
-def process_nas_buy(signal_type):
+    if waiting["resistance"] is not None:
+        if not waiting_valid(waiting["resistance"]):
+            waiting["resistance"] = None
+            print("[WAIT EXPIRED] NAS SELL")
 
-    now = datetime.now(KST)
 
-    # =====================================================
-    # 매매시간 외
-    # =====================================================
+@app.post("/webhook")
+async def tradingview_webhook(request: Request):
+    raw_body = await request.body()
 
-    if not is_trade_time_kst():
+    message = raw_body.decode(
+        "utf-8",
+        errors="replace",
+    ).strip()
 
-        print(
-            f"🚫 NAS BUY 조건 "
-            f"{signal_type} → 매매시간 외. 무시"
-        )
+    print(f"\n[WEBHOOK RECEIVED] {message}")
 
+    parsed = parse_message(message)
+
+    if parsed is None:
         return {
             "status": "ignored",
-            "reason": "outside_trading_hours",
-            "symbol": "NAS",
-            "signal": signal_type
+            "message": message,
+            "kst": kst_now_text(),
         }
 
-    # =====================================================
-    # BUY 조건이 들어오면 SELL 대기 폐기
-    # =====================================================
+    symbol, event = parsed
 
-    nas_sell_waiting["resistance"] = None
-    nas_sell_waiting["down"] = None
+    if symbol != "NAS":
+        return {
+            "status": "ignored",
+            "reason": "non_nas_symbol",
+            "message": message,
+            "kst": kst_now_text(),
+        }
 
-    # =====================================================
-    # support 또는 up 기록
-    #
-    # 반복 발생하면 마지막 신호 기준으로
-    # 20분을 다시 시작
-    # =====================================================
+    cleanup_waiting()
 
-    nas_buy_waiting[signal_type] = now
+    if event == "support":
+        waiting["support"] = now_utc()
 
-    print(
-        f"⏳ NAS BUY 조건 기록 → "
-        f"{signal_type}"
-    )
-
-    print(
-        f"⏰ 기준 시간: "
-        f"{now.strftime('%H:%M:%S')} KST"
-    )
-
-    # =====================================================
-    # 두 조건 존재 여부
-    # =====================================================
-
-    support_time = nas_buy_waiting["support"]
-    up_time = nas_buy_waiting["up"]
-
-    if support_time is None or up_time is None:
+        print("[WAIT BUY] NAS 지지구간 → 120분 시작/갱신")
 
         return {
             "status": "waiting",
             "symbol": "NAS",
             "direction": "BUY",
-            "condition": "지지구간 + 상승"
+            "wait_seconds": WAIT_SECONDS,
+            "kst": kst_now_text(),
         }
 
-    # =====================================================
-    # 두 조건 시간 차이
-    # =====================================================
+    if event == "resistance":
+        waiting["resistance"] = now_utc()
 
-    gap = abs(
-        (
-            support_time - up_time
-        ).total_seconds()
-    )
-
-    # =====================================================
-    # 20분 이내 → BUY
-    # =====================================================
-
-    if gap <= WAIT_SECONDS:
-
-        print(
-            f"🔥 NAS100 BUY 조건 완성"
-        )
-
-        print(
-            f"지지구간 + 상승"
-        )
-
-        print(
-            f"⏱ 조건 간격: "
-            f"{gap:.1f}초"
-        )
-
-        result = create_final_signal(
-            "NAS",
-            "BUY"
-        )
-
-        clear_nas_waiting()
-
-        return result
-
-    # =====================================================
-    # 20분 초과
-    # =====================================================
-
-    print(
-        f"⌛ NAS BUY 조건 "
-        f"20분 초과 → 폐기"
-    )
-
-    clear_nas_waiting()
-
-    return {
-        "status": "ignored",
-        "reason": "pair_expired",
-        "symbol": "NAS",
-        "direction": "BUY"
-    }
-
-
-# =========================================================
-# [10] NAS SELL 조건 처리
-# =========================================================
-#
-# SELL 조건:
-#
-#   (저항구간 생성 OR 저항구간 진입)
-#                    +
-#              NAS100 하락
-#
-# 두 신호 순서 관계없음.
-# =========================================================
-
-def process_nas_sell(signal_type):
-
-    now = datetime.now(KST)
-
-    # =====================================================
-    # 매매시간 외
-    # =====================================================
-
-    if not is_trade_time_kst():
-
-        print(
-            f"🚫 NAS SELL 조건 "
-            f"{signal_type} → 매매시간 외. 무시"
-        )
-
-        return {
-            "status": "ignored",
-            "reason": "outside_trading_hours",
-            "symbol": "NAS",
-            "signal": signal_type
-        }
-
-    # =====================================================
-    # SELL 조건이 들어오면 BUY 대기 폐기
-    # =====================================================
-
-    nas_buy_waiting["support"] = None
-    nas_buy_waiting["up"] = None
-
-    # =====================================================
-    # resistance 또는 down 기록
-    #
-    # 반복 발생하면 마지막 신호 기준으로
-    # 20분을 다시 시작
-    # =====================================================
-
-    nas_sell_waiting[signal_type] = now
-
-    print(
-        f"⏳ NAS SELL 조건 기록 → "
-        f"{signal_type}"
-    )
-
-    print(
-        f"⏰ 기준 시간: "
-        f"{now.strftime('%H:%M:%S')} KST"
-    )
-
-    # =====================================================
-    # 두 조건 존재 여부
-    # =====================================================
-
-    resistance_time = nas_sell_waiting["resistance"]
-    down_time = nas_sell_waiting["down"]
-
-    if (
-        resistance_time is None
-        or down_time is None
-    ):
+        print("[WAIT SELL] NAS 저항구간 → 120분 시작/갱신")
 
         return {
             "status": "waiting",
             "symbol": "NAS",
             "direction": "SELL",
-            "condition": "저항구간 + 하락"
+            "wait_seconds": WAIT_SECONDS,
+            "kst": kst_now_text(),
         }
 
-    # =====================================================
-    # 두 조건 시간 차이
-    # =====================================================
+    if event == "buy_force":
+        if not waiting_valid(waiting["support"]):
+            waiting["support"] = None
 
-    gap = abs(
-        (
-            resistance_time - down_time
-        ).total_seconds()
-    )
+            print("[BUY IGNORED] NAS BUY 대기 없음 또는 120분 만료")
 
-    # =====================================================
-    # 20분 이내 → SELL
-    # =====================================================
+            return {
+                "status": "ignored",
+                "reason": "no_valid_buy_waiting",
+                "symbol": "NAS",
+                "kst": kst_now_text(),
+            }
 
-    if gap <= WAIT_SECONDS:
+        waiting["support"] = None
 
-        print(
-            f"🔥 NAS100 SELL 조건 완성"
-        )
+        print("[BUY FINAL] NAS100")
+        send_telegram("BUY")
 
-        print(
-            f"저항구간 + 하락"
-        )
+        return {
+            "status": "telegram_signal",
+            "symbol": "NAS",
+            "direction": "BUY",
+            "reason": "support_then_buy_force",
+            "kst": kst_now_text(),
+        }
 
-        print(
-            f"⏱ 조건 간격: "
-            f"{gap:.1f}초"
-        )
+    if event == "sell_force":
+        if not waiting_valid(waiting["resistance"]):
+            waiting["resistance"] = None
 
-        result = create_final_signal(
-            "NAS",
-            "SELL"
-        )
+            print("[SELL IGNORED] NAS SELL 대기 없음 또는 120분 만료")
 
-        clear_nas_waiting()
+            return {
+                "status": "ignored",
+                "reason": "no_valid_sell_waiting",
+                "symbol": "NAS",
+                "kst": kst_now_text(),
+            }
 
-        return result
+        waiting["resistance"] = None
 
-    # =====================================================
-    # 20분 초과
-    # =====================================================
+        print("[SELL FINAL] NAS100")
+        send_telegram("SELL")
 
-    print(
-        f"⌛ NAS SELL 조건 "
-        f"20분 초과 → 폐기"
-    )
-
-    clear_nas_waiting()
+        return {
+            "status": "telegram_signal",
+            "symbol": "NAS",
+            "direction": "SELL",
+            "reason": "resistance_then_sell_force",
+            "kst": kst_now_text(),
+        }
 
     return {
         "status": "ignored",
-        "reason": "pair_expired",
+        "reason": "unknown_event",
         "symbol": "NAS",
-        "direction": "SELL"
-    }
-
-
-# =========================================================
-# [11] BTC SMR 대기 시작 / 갱신
-# =========================================================
-#
-# BTC 기존 로직 유지
-# =========================================================
-
-def start_waiting(symbol, direction):
-
-    if not is_trade_time_kst():
-
-        print(
-            f"🚫 {symbol} {direction} "
-            f"SMR → 매매시간 외. 무시"
-        )
-
-        return {
-            "status": "ignored",
-            "reason": "outside_trading_hours",
-            "symbol": symbol,
-            "direction": direction
-        }
-
-    check_timeout(symbol)
-
-    now = datetime.now(KST)
-    waiting = btc_waiting
-
-    # 같은 방향 SMR 반복
-    if (
-        waiting["active"]
-        and
-        waiting["direction"] == direction
-    ):
-
-        waiting["timestamp"] = now
-
-        print(
-            f"🔄 {symbol} {direction} "
-            f"SMR 추가 발생"
-        )
-
-        print(
-            f"⏱ 마지막 신호 기준 "
-            f"20분 대기 갱신"
-        )
-
-        return {
-            "status": "waiting",
-            "symbol": symbol,
-            "direction": direction
-        }
-
-    # 새로운 대기 시작
-    waiting["active"] = True
-    waiting["direction"] = direction
-    waiting["timestamp"] = now
-
-    print(
-        f"⏳ {symbol} {direction} "
-        f"대기 시작"
-    )
-
-    print(
-        f"⏰ 기준 시간: "
-        f"{now.strftime('%H:%M:%S')} KST"
-    )
-
-    return {
-        "status": "waiting",
-        "symbol": symbol,
-        "direction": direction
-    }
-
-
-# =========================================================
-# [12] BTC 대기시간 초과 확인
-# =========================================================
-
-def check_timeout(symbol):
-
-    waiting = btc_waiting
-
-    if not waiting["active"]:
-        return False
-
-    now = datetime.now(KST)
-
-    elapsed = (
-        now - waiting["timestamp"]
-    ).total_seconds()
-
-    if elapsed >= WAIT_SECONDS:
-
-        print(
-            f"⌛ {symbol} "
-            f"{waiting['direction']} "
-            f"대기시간 종료"
-        )
-
-        waiting["active"] = False
-        waiting["direction"] = None
-        waiting["timestamp"] = None
-
-        return True
-
-    return False
-
-
-# =========================================================
-# [13] BTC 0선 돌파 처리
-# =========================================================
-
-def process_zero_cross(symbol):
-
-    waiting = btc_waiting
-
-    if not is_trade_time_kst():
-
-        print(
-            f"🚫 {symbol} 0선 돌파 "
-            f"→ 매매시간 외. 완전 무시"
-        )
-
-        waiting["active"] = False
-        waiting["direction"] = None
-        waiting["timestamp"] = None
-
-        return {
-            "status": "ignored",
-            "reason": "outside_trading_hours"
-        }
-
-    if not waiting["active"]:
-
-        print(
-            f"⚪ {symbol} 0선 돌파 → "
-            f"SMR 대기 없음. 무시"
-        )
-
-        return {
-            "status": "ignored",
-            "reason": "no_smr_waiting"
-        }
-
-    if check_timeout(symbol):
-
-        print(
-            f"⚪ {symbol} 0선 돌파 → "
-            f"20분 초과. 무시"
-        )
-
-        return {
-            "status": "ignored",
-            "reason": "waiting_expired"
-        }
-
-    direction = waiting["direction"]
-
-    result = create_final_signal(
-        symbol,
-        direction
-    )
-
-    waiting["active"] = False
-    waiting["direction"] = None
-    waiting["timestamp"] = None
-
-    print(
-        f"✅ {symbol} 최종 "
-        f"{direction} 신호 완료"
-    )
-
-    return result
-
-
-# =========================================================
-# [14] NAS 방향별 청산
-# =========================================================
-#
-# NAS100 상승청산
-#   → BUY 포지션만 청산
-#
-# NAS100 하락청산
-#   → SELL 포지션만 청산
-#
-# 청산은 24시간
-# =========================================================
-
-def process_nas_close(close_direction):
-
-    global nas_position
-
-    print(
-        f"⚪ NAS100 청산 신호 → "
-        f"{close_direction}"
-    )
-
-    # =====================================================
-    # BUY 청산
-    # =====================================================
-
-    if close_direction == "CLOSE_BUY":
-
-        if nas_position != "BUY":
-
-            print(
-                f"⚪ NAS100 BUY 청산 → "
-                f"현재 BUY 포지션 없음. 무시"
-            )
-
-            return {
-                "status": "ignored",
-                "reason": "no_buy_position",
-                "symbol": "NAS",
-                "direction": "CLOSE_BUY"
-            }
-
-        send_telegram_signal(
-            "CLOSE_BUY",
-            "NAS100"
-        )
-
-        nas_position = None
-
-        return {
-            "status": "closed",
-            "symbol": "NAS",
-            "direction": "CLOSE_BUY"
-        }
-
-    # =====================================================
-    # SELL 청산
-    # =====================================================
-
-    if close_direction == "CLOSE_SELL":
-
-        if nas_position != "SELL":
-
-            print(
-                f"⚪ NAS100 SELL 청산 → "
-                f"현재 SELL 포지션 없음. 무시"
-            )
-
-            return {
-                "status": "ignored",
-                "reason": "no_sell_position",
-                "symbol": "NAS",
-                "direction": "CLOSE_SELL"
-            }
-
-        send_telegram_signal(
-            "CLOSE_SELL",
-            "NAS100"
-        )
-
-        nas_position = None
-
-        return {
-            "status": "closed",
-            "symbol": "NAS",
-            "direction": "CLOSE_SELL"
-        }
-
-
-# =========================================================
-# [15] BTC 전체 청산
-# =========================================================
-#
-# BTC 기존 로직 유지
-# =========================================================
-
-def process_close(symbol):
-
-    global nas_position
-    global btc_position
-
-    if symbol == "NAS":
-        position = nas_position
-    else:
-        position = btc_position
-
-    print(
-        f"⚪ {symbol} 청산 신호 수신 "
-        f"(현재 포지션: {position})"
-    )
-
-    if position is None:
-
-        print(
-            f"⚪ {symbol} 청산 → "
-            f"현재 포지션 없음. 무시"
-        )
-
-        return {
-            "status": "ignored",
-            "reason": "no_position"
-        }
-
-    send_telegram_signal(
-        "CLOSE",
-        "NAS100" if symbol == "NAS" else "BTC"
-    )
-
-    if symbol == "NAS":
-        nas_position = None
-    else:
-        btc_position = None
-
-    return {
-        "status": "closed",
-        "symbol": symbol,
-        "previous_position": position
-    }
-
-
-# =========================================================
-# [16] TradingView 웹훅
-# =========================================================
-
-@app.post("/webhook")
-async def webhook(request: Request):
-
-    body = await request.body()
-
-    message = body.decode(
-        "utf-8",
-        errors="ignore"
-    ).strip()
-
-    print("\n==============================")
-    print("📩 TradingView 수신")
-    print(message)
-    print("==============================")
-
-    clean_message = (
-        message
-        .replace(" ", "")
-        .upper()
-    )
-
-    # =====================================================
-    # NAS
-    # =====================================================
-
-    if "NAS" in clean_message:
-
-        # -------------------------------------------------
-        # BUY 청산
-        #
-        # NAS100 상승청산
-        # -------------------------------------------------
-
-        if "NAS100상승청산" in clean_message:
-
-            clear_nas_waiting()
-
-            return process_nas_close(
-                "CLOSE_BUY"
-            )
-
-        # -------------------------------------------------
-        # SELL 청산
-        #
-        # NAS100 하락청산
-        # -------------------------------------------------
-
-        if "NAS100하락청산" in clean_message:
-
-            clear_nas_waiting()
-
-            return process_nas_close(
-                "CLOSE_SELL"
-            )
-
-        # -------------------------------------------------
-        # 상승
-        # -------------------------------------------------
-
-        if "NAS100상승" in clean_message:
-
-            return process_nas_buy("up")
-
-        # -------------------------------------------------
-        # 하락
-        # -------------------------------------------------
-
-        if "NAS100하락" in clean_message:
-
-            return process_nas_sell("down")
-
-        # -------------------------------------------------
-        # 지지구간
-        #
-        # 생성 / 진입 둘 다 BUY 조건
-        # -------------------------------------------------
-
-        if "지지구간" in clean_message:
-
-            return process_nas_buy("support")
-
-        # -------------------------------------------------
-        # 저항구간
-        #
-        # 생성 / 진입 둘 다 SELL 조건
-        # -------------------------------------------------
-
-        if "저항구간" in clean_message:
-
-            return process_nas_sell("resistance")
-
-        return {
-            "status": "ignored",
-            "reason": "NAS_unknown_signal"
-        }
-
-    # =====================================================
-    # BTC
-    # =====================================================
-
-    if "BTC" in clean_message:
-
-        # -------------------------------------------------
-        # 기존 BTC 청산
-        # -------------------------------------------------
-
-        if "BTC청산" in clean_message:
-
-            return process_close("BTC")
-
-        # -------------------------------------------------
-        # 기존 BTC 0선 돌파
-        # -------------------------------------------------
-
-        if "BTC0선돌파" in clean_message:
-
-            return process_zero_cross("BTC")
-
-        # -------------------------------------------------
-        # 기존 BTC 지지구간
-        # -------------------------------------------------
-
-        if "지지구간" in clean_message:
-
-            return start_waiting(
-                "BTC",
-                "BUY"
-            )
-
-        # -------------------------------------------------
-        # 기존 BTC 저항구간
-        # -------------------------------------------------
-
-        if "저항구간" in clean_message:
-
-            return start_waiting(
-                "BTC",
-                "SELL"
-            )
-
-        return {
-            "status": "ignored",
-            "reason": "BTC_unknown_signal"
-        }
-
-    # =====================================================
-    # 알 수 없는 신호
-    # =====================================================
-
-    return {
-        "status": "ignored",
-        "reason": "no_symbol_tag"
-    }
-
-
-# =========================================================
-# [17] 현재 대기 상태 확인
-# =========================================================
-
-@app.get("/waiting/{symbol}")
-def get_waiting(symbol: str):
-
-    symbol = symbol.upper()
-
-    # =====================================================
-    # NAS
-    # =====================================================
-
-    if symbol == "NAS":
-
-        return {
-            "symbol": symbol,
-
-            "buy_support": (
-                nas_buy_waiting["support"].strftime(
-                    "%Y-%m-%d %H:%M:%S KST"
-                )
-                if nas_buy_waiting["support"]
-                else None
-            ),
-
-            "buy_up": (
-                nas_buy_waiting["up"].strftime(
-                    "%Y-%m-%d %H:%M:%S KST"
-                )
-                if nas_buy_waiting["up"]
-                else None
-            ),
-
-            "sell_resistance": (
-                nas_sell_waiting["resistance"].strftime(
-                    "%Y-%m-%d %H:%M:%S KST"
-                )
-                if nas_sell_waiting["resistance"]
-                else None
-            ),
-
-            "sell_down": (
-                nas_sell_waiting["down"].strftime(
-                    "%Y-%m-%d %H:%M:%S KST"
-                )
-                if nas_sell_waiting["down"]
-                else None
-            )
-        }
-
-    # =====================================================
-    # BTC
-    # =====================================================
-
-    elif symbol == "BTC":
-
-        waiting = btc_waiting
-
-    else:
-
-        return {
-            "status": "error",
-            "reason": "unknown_symbol"
-        }
-
-    return {
-        "symbol": symbol,
-        "active": waiting["active"],
-        "direction": waiting["direction"],
-
-        "timestamp": (
-            waiting["timestamp"].strftime(
-                "%Y-%m-%d %H:%M:%S KST"
-            )
-            if waiting["timestamp"]
-            else None
-        )
-    }
-
-
-# =========================================================
-# [18] 현재 포지션 상태 확인
-# =========================================================
-
-@app.get("/position/{symbol}")
-def get_position(symbol: str):
-
-    symbol = symbol.upper()
-
-    if symbol == "NAS":
-
-        position = nas_position
-
-    elif symbol == "BTC":
-
-        position = btc_position
-
-    else:
-
-        return {
-            "status": "error",
-            "reason": "unknown_symbol"
-        }
-
-    return {
-        "symbol": symbol,
-        "position": position
-    }
-
-
-# =========================================================
-# [19] 신호 기록 확인
-# =========================================================
-
-@app.get("/signal/{symbol}")
-def get_signal(symbol: str):
-
-    symbol = symbol.upper()
-
-    if symbol not in signals_history:
-
-        return {
-            "status": "error",
-            "reason": "unknown_symbol"
-        }
-
-    return {
-        "symbol": symbol,
-        "signals": signals_history[symbol]
-    }
-
-
-# =========================================================
-# [20] 현재 매매시간 확인
-# =========================================================
-
-@app.get("/trading-time")
-def trading_time():
-
-    return {
+        "event": event,
         "kst": kst_now_text(),
+    }
 
-        "trading_allowed": (
-            is_trade_time_kst()
-        ),
 
-        "schedule": [
-            "08:00-21:00 KST",
-            "22:35-05:00 KST"
-        ],
+@app.get("/waiting")
+def get_waiting():
+    cleanup_waiting()
 
-        "close_allowed_24h": True,
+    buy_remaining = 0
+    sell_remaining = 0
 
-        "wait_seconds": WAIT_SECONDS
+    if waiting["support"] is not None:
+        buy_remaining = max(
+            0,
+            int(
+                WAIT_SECONDS
+                - (now_utc() - waiting["support"]).total_seconds()
+            ),
+        )
+
+    if waiting["resistance"] is not None:
+        sell_remaining = max(
+            0,
+            int(
+                WAIT_SECONDS
+                - (now_utc() - waiting["resistance"]).total_seconds()
+            ),
+        )
+
+    return {
+        "symbol": "NAS",
+        "buy_waiting": waiting["support"] is not None,
+        "buy_remaining_seconds": buy_remaining,
+        "buy_remaining_minutes": round(buy_remaining / 60, 1),
+        "sell_waiting": waiting["resistance"] is not None,
+        "sell_remaining_seconds": sell_remaining,
+        "sell_remaining_minutes": round(sell_remaining / 60, 1),
+        "kst": kst_now_text(),
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "system": "NAS100 TELEGRAM ONLY",
+        "wait_minutes": WAIT_SECONDS // 60,
+        "telegram": bool(BOT_TOKEN and CHAT_ID),
+        "kst": kst_now_text(),
     }
