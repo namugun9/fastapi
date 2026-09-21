@@ -53,19 +53,31 @@ def send_telegram(direction: str):
             f"⏰ 시간: {kst_now_text()}"
         )
 
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": CHAT_ID,
-                "text": text,
-                "parse_mode": "Markdown",
-            },
-            timeout=10,
-        )
-        print(f"[TELEGRAM] {response.status_code}")
-    except Exception as e:
-        print(f"[TELEGRAM ERROR] {e}")
+    # CHAT_ID가 콤마로 여러 개 묶여 있을 수 있으므로 분리해서 각각 전송
+    chat_ids = [
+        cid.strip()
+        for cid in CHAT_ID.split(",")
+        if cid.strip()
+    ]
+
+    for chat_id in chat_ids:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                },
+                timeout=10,
+            )
+            print(
+                f"[TELEGRAM] chat_id={chat_id} "
+                f"status={response.status_code} "
+                f"body={response.text}"
+            )
+        except Exception as e:
+            print(f"[TELEGRAM ERROR] chat_id={chat_id} {e}")
 
 
 def parse_message(message: str) -> Optional[Tuple[str, str]]:
